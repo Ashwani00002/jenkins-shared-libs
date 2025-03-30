@@ -32,13 +32,13 @@ def call(Map config = [:]) {
             error "Invalid JSON structure: Expected object at root level"
         }
 
-        def configKeys = jsonFile.keySet().collect { key ->
-            "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
+        // Construct full paths for keys in config-map-env.json
+        def configKeys = jsonFile.collectEntries { key, value ->
+            ["${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}": value]
         }
 
         // Add or update keys in Consul only if necessary
-        jsonFile.each { key, value ->
-            def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
+        configKeys.each { fullPath, value ->
             if (!existingKeys.containsKey(fullPath) || existingKeys[fullPath] != value) {
                 sh """
                     curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
@@ -50,7 +50,7 @@ def call(Map config = [:]) {
         }
 
         // Remove keys from Consul that are not in config-map-env.json
-        def keysToRemove = existingKeys.keySet().findAll { !configKeys.contains(it) }
+        def keysToRemove = existingKeys.keySet().findAll { !configKeys.containsKey(it) }
         keysToRemove.each { key ->
             sh """
                 curl -k -X DELETE '${consulAddr}/${key}'
