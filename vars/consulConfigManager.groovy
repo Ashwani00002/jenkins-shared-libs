@@ -1,4 +1,3 @@
-// vars/consulConfigManager.groovy
 def call(Map config = [:]) {
     def consulVersion = config.consulVersion ?: '1.10.0'
     def consulAddr = config.consulAddr ?: 'http://34.238.184.38:8500/v1/kv'
@@ -21,7 +20,9 @@ def call(Map config = [:]) {
         if (existingKeysResponse) {
             def parsedResponse = readJSON text: existingKeysResponse
             parsedResponse.each { item ->
-                existingKeys[item.Key] = item.Value
+                // Extract just the key name (last part of the path)
+                def keyName = item.Key.tokenize('/').last()
+                existingKeys[keyName] = item.Value
             }
         }
 
@@ -32,45 +33,77 @@ def call(Map config = [:]) {
             error "Invalid JSON structure: Expected object at root level"
         }
 
-        // Construct full paths for keys in config-map-env.json
-        def configKeys = jsonFile.collectEntries { key, value ->
-            ["${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}": value]
-        }
+        // Initialize change tracking
+        def changes = [
+            created: [],
+            updated: [],
+            deleted: []
+        ]
 
-        def updatedKeys = []  // List to store updated keys
-
-        // Add or update keys in Consul only if necessary
-        configKeys.each { fullPath, value ->
-            if (!existingKeys.containsKey(fullPath) || existingKeys[fullPath] != value) {
+        // Process changes - update or add new keys
+        jsonFile.each { key, value ->
+            def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
+            
+            // Check if this is a renamed key (value matches an existing key's value)
+            def oldKey = existingKeys.find { it.value == value }?.key
+            
+            if (oldKey && oldKey != key) {
+                // This is a renamed key - delete the old one
+                def oldFullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${oldKey}"
+                sh """
+                    curl -k -X DELETE '${consulAddr}/${oldFullPath}'
+                """
+                changes.deleted << oldKey
+                echo "Deleted renamed key: ${oldKey} (path: ${oldFullPath})"
+            }
+            
+            // Check if we need to update/create the key
+            if (!existingKeys.containsKey(key)) {
+                // New key
                 sh """
                     curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
                 """
-                echo "Uploaded/Updated: ${fullPath} with value: ${value}"
-                updatedKeys.add(fullPath)  // Track updated key
+                changes.created << key
+                echo "Created new key: ${key} (path: ${fullPath})"
+            } else if (existingKeys[key] != value) {
+                // Updated key
+                sh """
+                    curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
+                """
+                changes.updated << key
+                echo "Updated key: ${key} (path: ${fullPath})"
             } else {
-                echo "Skipped: ${fullPath} (already exists with correct value)"
+                echo "Skipped: ${key} (already exists with correct value)"
             }
         }
 
-        // Remove keys from Consul that are not in config-map-env.json
-        def keysToRemove = existingKeys.keySet().findAll { !configKeys.containsKey(it) }
-        keysToRemove.each { key ->
-            sh """
-                curl -k -X DELETE '${consulAddr}/${key}'
-            """
-            echo "Deleted: ${key}"
-            updatedKeys.add(key)  // Track deleted key as an update
+        // Print summary of all changes
+        echo "\n=== CONSUL CONFIGURATION CHANGES SUMMARY ==="
+        if (changes.created) {
+            echo "Created keys:"
+            changes.created.each { key -> echo "- ${key}" }
+        } else {
+            echo "No keys were created"
         }
-
-        // Print list of all updated keys at the end
-        echo "List of updated keys in Consul KV Store:"
-        updatedKeys.each { key ->
-            echo "- ${key}"
+        
+        if (changes.updated) {
+            echo "\nUpdated keys:"
+            changes.updated.each { key -> echo "- ${key}" }
+        } else {
+            echo "\nNo keys were updated"
         }
+        
+        if (changes.deleted) {
+            echo "\nDeleted keys (due to renaming):"
+            changes.deleted.each { key -> echo "- ${key}" }
+        } else {
+            echo "\nNo keys were deleted"
+        }
+        echo "==========================================="
 
     } catch (Exception e) {
         error "Consul configuration failed: ${e.getMessage()}"
     } finally {
-        sh "rm -f consul* || true"     // Cleanup
+        sh "rm -f consul* || true"  // Cleanup
     }
 }
