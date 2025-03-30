@@ -1,25 +1,34 @@
-def call(String consulVersion = '1.10.0', String consulAddr = 'http://34.238.184.38:8500/v1/kv') {
-    script {
+def call(Map config = [:]) {
+    def consulVersion = config.consulVersion ?: '1.10.0'
+    def consulAddr = config.consulAddr ?: 'http://34.238.184.38:8500/v1/kv'
+    
+    try {
         // Install Consul
-        sh "curl -sSL https://releases.hashicorp.com/consul/${consulVersion}/consul_${consulVersion}_linux_amd64.zip -o consul.zip"
-        unzip zipFile: 'consul.zip'
-        sh 'chmod +x consul && rm consul.zip'
+        sh """
+            curl -sSL https://releases.hashicorp.com/consul/${consulVersion}/consul_${consulVersion}_linux_amd64.zip -o consul.zip
+            unzip -o consul.zip
+            chmod +x consul
+            rm -f consul.zip
+        """
         
-        // Process JSON config
-        try {
-            def jFile = readJSON file: './config-map-env.json'
-            if(jFile instanceof Map) {
-                jFile.each { key, value ->
-                    def consulKey = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
-                    sh """
-                        curl -k --request PUT -d '${value}' '${consulAddr}/${consulKey}'
-                    """
-                }
-            } else {
-                error "Invalid JSON structure in config-map-env.json"
-            }
-        } catch(Exception e) {
-            error "Config processing failed: ${e.getMessage()}"
+        // Process Configuration
+        def jsonFile = readJSON file: './config-map-env.json'
+        
+        if(!(jsonFile instanceof Map)) {
+            error "Invalid JSON structure: Expected object at root level"
         }
+        
+        jsonFile.each { key, value ->
+            def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
+            sh """
+                curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
+            """
+            echo "Uploaded: ${fullPath}"
+        }
+        
+    } catch(Exception e) {
+        error "Consul configuration failed: ${e.getMessage()}"
+    } finally {
+        sh "rm -f consul* || true"  # Cleanup
     }
 }
