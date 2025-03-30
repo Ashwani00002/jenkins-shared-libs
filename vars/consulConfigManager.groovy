@@ -22,7 +22,10 @@ def call(Map config = [:]) {
             parsedResponse.each { item ->
                 // Extract just the key name (last part of the path)
                 def keyName = item.Key.tokenize('/').last()
-                existingKeys[keyName] = item.Value
+                existingKeys[keyName] = [
+                    value: item.Value,
+                    fullPath: item.Key
+                ]
             }
         }
 
@@ -45,15 +48,16 @@ def call(Map config = [:]) {
             def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
             
             // Check if this is a renamed key (value matches an existing key's value)
-            def oldKey = existingKeys.find { it.value == value }?.key
+            def oldKey = existingKeys.find { it.value.value == value }?.key
             
             if (oldKey && oldKey != key) {
                 // This is a renamed key - delete the old one
-                def oldFullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${oldKey}"
+                def oldFullPath = existingKeys[oldKey].fullPath
                 sh """
                     curl -k -X DELETE '${consulAddr}/${oldFullPath}'
                 """
                 changes.deleted << oldKey
+                existingKeys.remove(oldKey)  // Remove from tracking
                 echo "Deleted renamed key: ${oldKey} (path: ${oldFullPath})"
             }
             
@@ -64,37 +68,50 @@ def call(Map config = [:]) {
                     curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
                 """
                 changes.created << key
+                existingKeys[key] = [value: value, fullPath: fullPath]  // Add to tracking
                 echo "Created new key: ${key} (path: ${fullPath})"
-            } else if (existingKeys[key] != value) {
+            } else if (existingKeys[key].value != value) {
                 // Updated key
                 sh """
                     curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
                 """
                 changes.updated << key
+                existingKeys[key] = [value: value, fullPath: fullPath]  // Update tracking
                 echo "Updated key: ${key} (path: ${fullPath})"
             } else {
                 echo "Skipped: ${key} (already exists with correct value)"
             }
         }
 
+        // Identify keys to delete (present in Consul but not in config file)
+        def keysToDelete = existingKeys.keySet().findAll { !jsonFile.containsKey(it) }
+        keysToDelete.each { key ->
+            def fullPath = existingKeys[key].fullPath
+            sh """
+                curl -k -X DELETE '${consulAddr}/${fullPath}'
+            """
+            changes.deleted << key
+            echo "Deleted removed key: ${key} (path: ${fullPath})"
+        }
+
         // Print summary of all changes
         echo "\n=== CONSUL CONFIGURATION CHANGES SUMMARY ==="
         if (changes.created) {
-            echo "Created keys:"
+            echo "Created keys (${changes.created.size()}):"
             changes.created.each { key -> echo "- ${key}" }
         } else {
             echo "No keys were created"
         }
         
         if (changes.updated) {
-            echo "\nUpdated keys:"
+            echo "\nUpdated keys (${changes.updated.size()}):"
             changes.updated.each { key -> echo "- ${key}" }
         } else {
             echo "\nNo keys were updated"
         }
         
         if (changes.deleted) {
-            echo "\nDeleted keys (due to renaming):"
+            echo "\nDeleted keys (${changes.deleted.size()}):"
             changes.deleted.each { key -> echo "- ${key}" }
         } else {
             echo "\nNo keys were deleted"
