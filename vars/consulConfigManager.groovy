@@ -11,19 +11,21 @@ def call(Map config = [:]) {
         unzip zipFile: 'consul.zip'
         sh "chmod +x consul && rm -f consul.zip"
 
-        // Fetch existing keys from Consul
+        // Fetch existing keys and values from Consul
         def existingKeysResponse = sh(
             script: "curl -s ${consulAddr}/${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}?recurse=true",
             returnStdout: true
         ).trim()
 
-        def existingKeys = []
+        def existingKeys = [:]  // Map to store existing keys and their values
         if (existingKeysResponse) {
             def parsedResponse = readJSON text: existingKeysResponse
-            existingKeys = parsedResponse.collect { it.Key }
+            parsedResponse.each { item ->
+                existingKeys[item.Key] = item.Value
+            }
         }
 
-        // Read keys from config-map-env.json
+        // Read keys and values from config-map-env.json
         def jsonFile = readJSON file: './config-map-env.json'
 
         if (!(jsonFile instanceof Map)) {
@@ -34,22 +36,26 @@ def call(Map config = [:]) {
             "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
         }
 
+        // Add or update keys in Consul only if necessary
+        jsonFile.each { key, value ->
+            def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
+            if (!existingKeys.containsKey(fullPath) || existingKeys[fullPath] != value) {
+                sh """
+                    curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
+                """
+                echo "Uploaded/Updated: ${fullPath} with value: ${value}"
+            } else {
+                echo "Skipped: ${fullPath} (already exists with correct value)"
+            }
+        }
+
         // Remove keys from Consul that are not in config-map-env.json
-        def keysToRemove = existingKeys.findAll { !configKeys.contains(it) }
+        def keysToRemove = existingKeys.keySet().findAll { !configKeys.contains(it) }
         keysToRemove.each { key ->
             sh """
                 curl -k -X DELETE '${consulAddr}/${key}'
             """
             echo "Deleted: ${key}"
-        }
-
-        // Add or update keys in Consul
-        jsonFile.each { key, value ->
-            def fullPath = "${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}"
-            sh """
-                curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
-            """
-            echo "Uploaded: ${fullPath}"
         }
 
     } catch (Exception e) {
