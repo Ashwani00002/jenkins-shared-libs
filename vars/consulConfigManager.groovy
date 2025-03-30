@@ -37,6 +37,8 @@ def call(Map config = [:]) {
             ["${env.ENV}/${env.CLUSTER}/${env.APPLICATION_CONFIG_MAP}/${key}": value]
         }
 
+        def updatedKeys = []  // List to store updated keys
+
         // Add or update keys in Consul only if necessary
         configKeys.each { fullPath, value ->
             if (!existingKeys.containsKey(fullPath) || existingKeys[fullPath] != value) {
@@ -44,6 +46,7 @@ def call(Map config = [:]) {
                     curl -k -X PUT -d '${value}' '${consulAddr}/${fullPath}'
                 """
                 echo "Uploaded/Updated: ${fullPath} with value: ${value}"
+                updatedKeys.add(fullPath)  // Track updated key
             } else {
                 echo "Skipped: ${fullPath} (already exists with correct value)"
             }
@@ -56,11 +59,18 @@ def call(Map config = [:]) {
                 curl -k -X DELETE '${consulAddr}/${key}'
             """
             echo "Deleted: ${key}"
+            updatedKeys.add(key)  // Track deleted key as an update
+        }
+
+        // Print list of all updated keys at the end
+        echo "List of updated keys in Consul KV Store:"
+        updatedKeys.each { key ->
+            echo "- ${key}"
         }
 
     } catch (Exception e) {
         error "Consul configuration failed: ${e.getMessage()}"
     } finally {
-        sh "rm -f consul* || true"  // Cleanup
+        sh "rm -f consul* || true"     // Cleanup
     }
 }
