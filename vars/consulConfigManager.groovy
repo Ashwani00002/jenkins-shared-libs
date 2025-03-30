@@ -29,6 +29,6 @@ def call(Map config = [:]) {
     } catch(Exception e) {
         error "Consul configuration failed: ${e.getMessage()}"
     } finally {
-        sh "rm -f consul* || true"  # Cleanup
+        sh "rm -f consul* || true" 
     }
 }
